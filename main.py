@@ -11,7 +11,7 @@ import telebot
 from telebot import TeleBot
 
 # ================= الإعدادات =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكنك_هنا")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8651111573:AAFUnC1pLioFKdPxLmk_7GA54-KkGCNvcNk")
 CHAT_ID = os.getenv("CHAT_ID", "1330666633")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER", "101145238")
 
