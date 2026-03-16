@@ -24,44 +24,34 @@ if not BOT_TOKEN or ":" not in BOT_TOKEN:
 
 bot = TeleBot(BOT_TOKEN)
 
-# بروكسيات يمنية ثابتة للتجربة
-proxy_list = [
-    "109.200.160.159:8080",
-    "89.189.72.195:8080",
-    "188.240.118.197:8080",
-    "134.35.223.173:8080",
-    "134.35.193.176:8080",
-    "131.117.165.191:8080",
-    "134.35.245.127:8080",
-    "134.35.175.134:8080",
-    "89.189.84.196:8080",
-    "89.189.95.209:8080",
-    "134.35.5.40:8080",
-    "134.35.22.148:8080",
-    "134.35.168.83:8080",
-    "178.130.98.65:8080",
-    "89.189.79.251:8080",
-    "175.110.7.115:8080",
-    "134.35.14.162:8080",
-    "175.110.21.244:8080",
-    "134.35.148.115:8080",
-    "134.35.2.54:8080",
-    "134.35.52.239:8080",
-    "134.35.14.82:8080",
-    "46.35.80.139:8085",
-    "134.35.22.178:8085",
-    "109.200.175.38:8080",
-    "178.130.75.210:8080",
-    "134.35.164.62:8080",
-    "134.35.170.221:8080",
-    "134.35.190.136:8080",
-    "134.35.217.74:8080",
-]
-
 last_low_balance_alert = None
 last_report_sent = None
 
+# ================= دالة جلب البروكسيات التلقائية =================
+def get_fresh_yemeni_proxies():
+    """تقوم بجلب أحدث البروكسيات اليمنية من API مجاني"""
+    logging.info("جاري جلب بروكسيات يمنية جديدة من API...")
+    proxies = []
+    try:
+        # استخدام ProxyScrape API لجلب بروكسيات HTTP لدولة اليمن
+        api_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=YE&ssl=all&anonymity=all"
+        response = requests.get(api_url, timeout=10)
+        
+        if response.status_code == 200:
+            # تقسيم النص إلى أسطر وتنظيف المسافات
+            raw_proxies = response.text.strip().split('\n')
+            proxies = [p.strip() for p in raw_proxies if p.strip()]
+            logging.info(f"✅ تم العثور على {len(proxies)} بروكسي يمني جديد.")
+        else:
+            logging.warning(f"⚠️ فشل جلب البروكسيات، كود الاستجابة: {response.status_code}")
+            
+    except Exception as e:
+        logging.error(f"❌ خطأ أثناء الاتصال بـ API البروكسيات: {e}")
+        
+    return proxies
 
+
+# ================= دوال فك التشفير واستخراج البيانات =================
 def solve_altcha(challenge_json):
     salt = challenge_json.get("salt", "")
     target = challenge_json.get("challenge", "")
@@ -80,13 +70,11 @@ def solve_altcha(challenge_json):
             return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
     return None
 
-
 def parse_balance_text(report_text):
     match = re.search(r"رصيد الإنترنت:\s*(.+)", report_text)
     if match:
         return match.group(1).strip()
     return None
-
 
 def is_low_balance(balance_text):
     if not balance_text:
@@ -109,7 +97,6 @@ def is_low_balance(balance_text):
         return value <= 1.0
     except Exception:
         return False
-
 
 def extract_result_from_html(html):
     table_match = re.search(
@@ -150,7 +137,6 @@ def extract_result_from_html(html):
 
     return "⚠️ تم الوصول للموقع لكن لم أستطع استخراج النتيجة."
 
-
 def try_query_with_session(session):
     res = session.get("https://ptc.gov.ye/?page_id=9017", timeout=15)
 
@@ -189,7 +175,7 @@ def try_query_with_session(session):
 
     return extract_result_from_html(post_res.text), None
 
-
+# ================= دالة جلب الرصيد الرئيسية =================
 def get_balance_with_retry():
     # المحاولة الأولى: بدون بروكسي
     try:
@@ -203,8 +189,13 @@ def get_balance_with_retry():
     except Exception as e:
         logging.error(f"Direct request failed: {e}")
 
-    # المحاولات التالية: باستخدام بروكسيات يمنية
-    for p in proxy_list:
+    # المحاولات التالية: جلب بروكسيات جديدة ثم تجربتها
+    fresh_proxies = get_fresh_yemeni_proxies()
+    
+    if not fresh_proxies:
+        return "❌ فشل الاستعلام: الاتصال المباشر فشل، ولم يتم العثور على بروكسيات يمنية متاحة حالياً."
+
+    for p in fresh_proxies:
         try:
             session = requests.Session()
             session.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -226,9 +217,9 @@ def get_balance_with_retry():
             logging.error(f"Attempt failed with proxy {p}: {e}")
             continue
 
-    return "❌ فشل الاستعلام بعد تجربة الاتصال المباشر والبروكسيات اليمنية المتاحة."
+    return "❌ فشل الاستعلام بعد تجربة الاتصال المباشر وجميع البروكسيات اليمنية التي تم جلبها."
 
-
+# ================= التقرير التلقائي وواجهة البوت =================
 def auto_report():
     global last_low_balance_alert, last_report_sent
 
@@ -248,13 +239,13 @@ def auto_report():
                         bot.send_message(CHAT_ID, f"🚨 تنبيه: رصيد الإنترنت منخفض\n\n{report}")
                         last_low_balance_alert = balance_text
             else:
-                bot.send_message(CHAT_ID, report)
+                # يمكنك إلغاء تفعيل هذا السطر إذا لم تكن تريد تلقي رسائل الأخطاء بشكل متكرر
+                bot.send_message(CHAT_ID, report) 
 
         except Exception as e:
             logging.error(f"auto_report error: {e}")
 
         time.sleep(CHECK_INTERVAL)
-
 
 @bot.message_handler(commands=["start"])
 def start_message(message):
@@ -266,20 +257,17 @@ def start_message(message):
         ". - فحص سريع\n"
     )
 
-
 @bot.message_handler(commands=["check"])
 def check_balance(message):
-    bot.reply_to(message, "⏳ جاري فحص الرصيد...")
+    bot.reply_to(message, "⏳ جاري جلب بروكسيات جديدة وفحص الرصيد...")
     result = get_balance_with_retry()
     bot.send_message(message.chat.id, result)
-
 
 @bot.message_handler(func=lambda message: message.text == ".")
 def manual_check(message):
     bot.reply_to(message, "⏳ جاري محاولة جلب الرصيد...")
     result = get_balance_with_retry()
     bot.send_message(message.chat.id, result)
-
 
 if __name__ == "__main__":
     print("البوت يعمل الآن...")
