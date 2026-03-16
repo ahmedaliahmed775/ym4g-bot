@@ -14,38 +14,52 @@ from telebot import TeleBot
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8651111573:AAFUnC1pLioFKdPxLmk_7GA54-KkGCNvcNk")
 CHAT_ID = os.getenv("CHAT_ID", "1330666633")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER", "101145238")
-
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))   # افتراضياً كل ساعة
-LOW_BALANCE_KEYWORD = os.getenv("LOW_BALANCE_KEYWORD", "1") # للتنبيه إذا صار أقل من 1 جيجا تقريباً
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))  # كل ساعة افتراضياً
 
 telebot.logger.setLevel(logging.CRITICAL)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
+if not BOT_TOKEN or ":" not in BOT_TOKEN:
+    raise ValueError("BOT_TOKEN غير صالح. أضفه من المتغيرات ويجب أن يحتوي على ':'")
+
 bot = TeleBot(BOT_TOKEN)
 
-proxy_list = []
+# بروكسيات يمنية ثابتة للتجربة
+proxy_list = [
+    "109.200.160.159:8080",
+    "89.189.72.195:8080",
+    "188.240.118.197:8080",
+    "134.35.223.173:8080",
+    "134.35.193.176:8080",
+    "131.117.165.191:8080",
+    "134.35.245.127:8080",
+    "134.35.175.134:8080",
+    "89.189.84.196:8080",
+    "89.189.95.209:8080",
+    "134.35.5.40:8080",
+    "134.35.22.148:8080",
+    "134.35.168.83:8080",
+    "178.130.98.65:8080",
+    "89.189.79.251:8080",
+    "175.110.7.115:8080",
+    "134.35.14.162:8080",
+    "175.110.21.244:8080",
+    "134.35.148.115:8080",
+    "134.35.2.54:8080",
+    "134.35.52.239:8080",
+    "134.35.14.82:8080",
+    "46.35.80.139:8085",
+    "134.35.22.178:8085",
+    "109.200.175.38:8080",
+    "178.130.75.210:8080",
+    "134.35.164.62:8080",
+    "134.35.170.221:8080",
+    "134.35.190.136:8080",
+    "134.35.217.74:8080",
+]
+
 last_low_balance_alert = None
 last_report_sent = None
-
-
-def get_free_yemen_proxies():
-    proxies = []
-    sources = [
-        "https://proxyscrape.com/free-proxy-list/yemen",
-        "https://www.proxynova.com/proxy-server-list/country-ye/",
-        "https://spys.one/free-proxy-list/YE/"
-    ]
-
-    for url in sources:
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            res = requests.get(url, headers=headers, timeout=10)
-            found = re.findall(r'\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}', res.text)
-            proxies.extend(found)
-        except Exception:
-            continue
-
-    return list(set(proxies))
 
 
 def solve_altcha(challenge_json):
@@ -68,22 +82,25 @@ def solve_altcha(challenge_json):
 
 
 def parse_balance_text(report_text):
-    internet_balance = None
-
-    match = re.search(r'رصيد الإنترنت:\s*(.+)', report_text)
+    match = re.search(r"رصيد الإنترنت:\s*(.+)", report_text)
     if match:
-        internet_balance = match.group(1).strip()
-
-    return internet_balance
+        return match.group(1).strip()
+    return None
 
 
 def is_low_balance(balance_text):
     if not balance_text:
         return False
 
-    text = balance_text.replace("جيجا", "").replace("GB", "").strip()
+    text = (
+        balance_text
+        .replace("جيجا", "")
+        .replace("GB", "")
+        .replace("gb", "")
+        .strip()
+    )
 
-    num_match = re.search(r'(\d+(?:\.\d+)?)', text)
+    num_match = re.search(r"(\d+(?:\.\d+)?)", text)
     if not num_match:
         return False
 
@@ -94,105 +111,122 @@ def is_low_balance(balance_text):
         return False
 
 
+def extract_result_from_html(html):
+    table_match = re.search(
+        r'<table class="transdetail"[^>]*>(.*?)</table>',
+        html,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if table_match:
+        table_html = table_match.group(1)
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.DOTALL | re.IGNORECASE)
+        info = []
+
+        for row in rows:
+            cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.DOTALL | re.IGNORECASE)
+            if len(cells) >= 2:
+                key = re.sub(r"<[^>]+>", "", cells[0]).strip()
+                val = re.sub(r"<[^>]+>", "", cells[1]).strip()
+
+                if "رصيد الحساب" in key or "الرصيد المالي" in key:
+                    info.append(f"💰 الرصيد المالي: {val}")
+                elif "الرصيد المتاح" in key or "رصيد الإنترنت" in key:
+                    info.append(f"🌐 رصيد الإنترنت: {val}")
+                elif "تاريخ انتهاء" in key:
+                    info.append(f"🗓️ تاريخ الانتهاء: {val}")
+
+        if info:
+            return "\n".join(info)
+
+    msg_match = re.search(
+        r'<div[^>]*id="qbillmsgnew"[^>]*>(.*?)</div>',
+        html,
+        re.DOTALL | re.IGNORECASE
+    )
+    if msg_match:
+        clean_msg = re.sub(r"<[^>]+>", "", msg_match.group(1)).strip()
+        return f"⚠️ رسالة الموقع: {clean_msg}"
+
+    return "⚠️ تم الوصول للموقع لكن لم أستطع استخراج النتيجة."
+
+
+def try_query_with_session(session):
+    res = session.get("https://ptc.gov.ye/?page_id=9017", timeout=15)
+
+    if "challengeurl" not in res.text:
+        return None, "⚠️ الصفحة فتحت لكن لم يظهر challengeurl، أو أن الموقع رفض الـ IP."
+
+    match = re.search(r'challengeurl="([^"]+)"', res.text)
+    if not match:
+        return None, "⚠️ تعذر العثور على challengeurl."
+
+    challenge_url = match.group(1).replace("&amp;", "&")
+    if not challenge_url.startswith("http"):
+        challenge_url = "https://ptc.gov.ye" + challenge_url
+
+    challenge_res = session.get(challenge_url, timeout=15)
+    altcha_payload = solve_altcha(challenge_res.json())
+
+    if not altcha_payload:
+        return None, "⚠️ تعذر حل Altcha."
+
+    hidden_inputs = re.findall(
+        r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"',
+        res.text
+    )
+    data = {name: value for name, value in hidden_inputs}
+    data.update({
+        "phone4gidnew": PHONE_NUMBER,
+        "security_token_4gbill": altcha_payload,
+        "qsubmitnew": "استعلام"
+    })
+
+    post_res = session.post("https://ptc.gov.ye/?page_id=9017", data=data, timeout=15)
+
+    if "تجاوزت عدد مرات الاستعلام" in post_res.text:
+        return None, "⏳ الموقع يطلب الانتظار بسبب كثرة المحاولات."
+
+    return extract_result_from_html(post_res.text), None
+
+
 def get_balance_with_retry():
-    global proxy_list
-
-    if not proxy_list:
-        proxy_list = get_free_yemen_proxies()
-
-    max_attempts = min(len(proxy_list), 5) if proxy_list else 1
-
-    for _ in range(max_attempts + 1):
+    # المحاولة الأولى: بدون بروكسي
+    try:
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
+        result, error = try_query_with_session(session)
+        if result:
+            logging.info("Success without proxy")
+            return result
+        logging.warning(f"Direct request failed: {error}")
+    except Exception as e:
+        logging.error(f"Direct request failed: {e}")
 
-        proxy_config = None
-        if proxy_list:
-            p = proxy_list.pop(0)
-            proxy_config = {"http": f"http://{p}", "https": f"http://{p}"}
-            session.proxies.update(proxy_config)
-            logging.info(f"Trying proxy: {p}")
-
+    # المحاولات التالية: باستخدام بروكسيات يمنية
+    for p in proxy_list:
         try:
-            res = session.get("https://ptc.gov.ye/?page_id=9017", timeout=15)
-
-            if "challengeurl" not in res.text:
-                if proxy_config:
-                    logging.warning("Proxy did not bypass site restriction, trying next.")
-                    continue
-                return "⚠️ الموقع لا يفتح من هذا الـ IP أو يتطلب IP مناسب."
-
-            match = re.search(r'challengeurl="([^"]+)"', res.text)
-            if not match:
-                return "⚠️ تعذر العثور على challengeurl."
-
-            challenge_url = match.group(1).replace("&amp;", "&")
-            if not challenge_url.startswith("http"):
-                challenge_url = "https://ptc.gov.ye" + challenge_url
-
-            challenge_res = session.get(challenge_url, timeout=15)
-            altcha_payload = solve_altcha(challenge_res.json())
-
-            if not altcha_payload:
-                return "⚠️ تعذر حل Altcha."
-
-            hidden_inputs = re.findall(
-                r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"',
-                res.text
-            )
-            data = {name: value for name, value in hidden_inputs}
-            data.update({
-                "phone4gidnew": PHONE_NUMBER,
-                "security_token_4gbill": altcha_payload,
-                "qsubmitnew": "استعلام"
+            session = requests.Session()
+            session.headers.update({"User-Agent": "Mozilla/5.0"})
+            session.proxies.update({
+                "http": f"http://{p}",
+                "https": f"http://{p}",
             })
 
-            post_res = session.post("https://ptc.gov.ye/?page_id=9017", data=data, timeout=15)
+            logging.info(f"Trying proxy: {p}")
+            result, error = try_query_with_session(session)
 
-            if "تجاوزت عدد مرات الاستعلام" in post_res.text:
-                return "⏳ الموقع يطلب الانتظار بسبب كثرة المحاولات."
+            if result:
+                logging.info(f"Success with proxy: {p}")
+                return result
 
-            table_match = re.search(
-                r'<table class="transdetail"[^>]*>(.*?)</table>',
-                post_res.text,
-                re.DOTALL | re.IGNORECASE
-            )
-
-            if table_match:
-                table_html = table_match.group(1)
-                rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
-                info = []
-
-                for row in rows:
-                    cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', row, re.DOTALL | re.IGNORECASE)
-                    if len(cells) >= 2:
-                        key = re.sub(r'<[^>]+>', '', cells[0]).strip()
-                        val = re.sub(r'<[^>]+>', '', cells[1]).strip()
-
-                        if "رصيد الحساب" in key or "الرصيد المالي" in key:
-                            info.append(f"💰 الرصيد المالي: {val}")
-                        elif "الرصيد المتاح" in key or "رصيد الإنترنت" in key:
-                            info.append(f"🌐 رصيد الإنترنت: {val}")
-                        elif "تاريخ انتهاء" in key:
-                            info.append(f"🗓️ تاريخ الانتهاء: {val}")
-
-                if info:
-                    return "\n".join(info)
-
-            msg_match = re.search(
-                r'<div[^>]*id="qbillmsgnew"[^>]*>(.*?)</div>',
-                post_res.text,
-                re.DOTALL | re.IGNORECASE
-            )
-            if msg_match:
-                clean_msg = re.sub(r'<[^>]+>', '', msg_match.group(1)).strip()
-                return f"⚠️ رسالة الموقع: {clean_msg}"
+            logging.warning(f"Proxy failed {p}: {error}")
 
         except Exception as e:
-            logging.error(f"Attempt failed: {e}")
+            logging.error(f"Attempt failed with proxy {p}: {e}")
             continue
 
-    return "❌ فشل الاستعلام بعد عدة محاولات. قد تكون البروكسيات المجانية غير صالحة حالياً."
+    return "❌ فشل الاستعلام بعد تجربة الاتصال المباشر والبروكسيات اليمنية المتاحة."
 
 
 def auto_report():
