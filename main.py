@@ -5,6 +5,7 @@ import hashlib
 import base64
 import requests
 import threading
+import random
 import telebot
 from telebot import TeleBot
 
@@ -14,12 +15,32 @@ CHAT_ID = "1330666633"
 PHONE_NUMBER = "101145238"
 CHECK_INTERVAL = 3600  # الفحص كل ساعة
 
-# إعدادات API موقع adsl-yemen.com المستخرجة
+# إعدادات API موقع adsl-yemen.com 
 SUPABASE_URL = "https://kgowhsapgrolcyuiqwzf.supabase.co/functions/v1/telecom-inquiry"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtnb3doc2FwZ3JvbGN5dWlxd3pmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYyNTYxNzgsImV4cCI6MjA4MTgzMjE3OH0.3aHxxmaoWswxhzMAcc1aRas02bNnpxbPtf85JtCNe7I"
 HMAC_SECRET = "X7k9mP2vQ4wR8tY1uN3bF6hJ0cL5dS9aE2gI4oK7nM"
 
 bot = TeleBot(BOT_TOKEN)
+
+def get_random_proxy():
+    """جلب بروكسي عشوائي لتغيير الـ IP وتخطي الحظر"""
+    try:
+        # جلب قائمة بروكسيات عالمية سريعة
+        api_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all"
+        response = requests.get(api_url, timeout=10)
+        
+        if response.status_code == 200:
+            proxies = [p.strip() for p in response.text.strip().split('\n') if p.strip()]
+            if proxies:
+                selected_proxy = random.choice(proxies)
+                return {
+                    "http": f"http://{selected_proxy}",
+                    "https": f"http://{selected_proxy}"
+                }
+    except Exception as e:
+        print(f"⚠️ فشل جلب البروكسي: {e}")
+    
+    return None # العودة للاتصال المباشر إذا فشل جلب البروكسي
 
 def generate_signature(timestamp, nonce, mobile, service_type):
     """توليد التوقيع الرقمي المطلوب من قبل الـ API"""
@@ -32,7 +53,7 @@ def generate_signature(timestamp, nonce, mobile, service_type):
     return base64.b64encode(signature).decode('utf-8')
 
 def get_balance_from_adsl_yemen():
-    """الاستعلام عن الرصيد باستخدام API موقع adsl-yemen.com"""
+    """الاستعلام عن الرصيد باستخدام API مع تغيير الـ IP"""
     try:
         timestamp = str(int(time.time() * 1000))
         nonce = str(uuid.uuid4())
@@ -48,7 +69,7 @@ def get_balance_from_adsl_yemen():
             "X-Request-Timestamp": timestamp,
             "X-Request-Nonce": nonce,
             "X-Request-Signature": signature,
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         
         payload = {
@@ -57,7 +78,17 @@ def get_balance_from_adsl_yemen():
             "action": "query"
         }
         
-        response = requests.post(SUPABASE_URL, headers=headers, json=payload, timeout=20)
+        # جلب بروكسي عشوائي
+        proxy_dict = get_random_proxy()
+        
+        # إرسال الطلب عبر البروكسي
+        response = requests.post(
+            SUPABASE_URL, 
+            headers=headers, 
+            json=payload, 
+            proxies=proxy_dict, 
+            timeout=20
+        )
         result = response.json()
         
         if response.status_code == 200 and result.get("success"):
@@ -74,17 +105,17 @@ def get_balance_from_adsl_yemen():
                 f"📦 قيمة الباقة: `{package}`\n"
                 f"🗓️ تاريخ الانتهاء: `{expiry}`\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🔗 تم الاستعلام عبر adsl-yemen.com"
+                f"🔗 تم الاستعلام عبر API مع تغيير الـ IP"
             )
             return report
         elif response.status_code == 429:
-            return "⚠️ تم تجاوز حد الاستعلامات المسموح به حالياً. يرجى المحاولة لاحقاً."
+            return "⚠️ تم تجاوز حد الاستعلامات المسموح به. (جرب مرة أخرى ليقوم البوت بتغيير الـ IP)"
         else:
             error_msg = result.get("error", "حدث خطأ غير معروف")
             return f"❌ فشل الاستعلام: {error_msg}"
             
     except Exception as e:
-        return f"📡 خطأ في الاتصال بالخدمة: {str(e)}"
+        return f"📡 خطأ في الاتصال (قد يكون البروكسي بطيئاً، حاول مجدداً): {str(e)}"
 
 @bot.message_handler(commands=["start"])
 def start_message(message):
@@ -98,13 +129,13 @@ def start_message(message):
 
 @bot.message_handler(commands=["check"])
 def command_check(message):
-    bot.reply_to(message, "⏳ جاري الاستعلام من adsl-yemen.com...")
+    bot.reply_to(message, "⏳ جاري تغيير الـ IP والاستعلام...")
     report = get_balance_from_adsl_yemen()
     bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == '.')
 def manual_check(message):
-    bot.reply_to(message, "⏳ جاري الاستعلام من adsl-yemen.com...")
+    bot.reply_to(message, "⏳ جاري تغيير الـ IP والاستعلام...")
     report = get_balance_from_adsl_yemen()
     bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
@@ -116,7 +147,7 @@ def auto_report():
         report = get_balance_from_adsl_yemen()
         
         # إرسال التقرير فقط إذا لم يكن هناك خطأ في الاتصال
-        if "فشل" not in report and "خطأ" not in report:
+        if "فشل" not in report and "خطأ" not in report and "تجاوز" not in report:
             if report != last_report_sent:
                 bot.send_message(CHAT_ID, f"🔔 **تقرير دوري**\n\n{report}", parse_mode="Markdown")
                 last_report_sent = report
@@ -124,6 +155,6 @@ def auto_report():
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    print("البوت يعمل الآن... أرسل نقطة (.) أو /check للاستعلام")
+    print("البوت يعمل الآن... يتم تغيير الـ IP عند كل استعلام.")
     threading.Thread(target=auto_report, daemon=True).start()
     bot.polling(none_stop=True)
