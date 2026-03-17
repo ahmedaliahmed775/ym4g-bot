@@ -1,251 +1,90 @@
-import os
 import time
-import re
-import threading
-import json
-import base64
+import uuid
+import hmac
 import hashlib
+import base64
 import requests
-import logging
+import threading
 import telebot
 from telebot import TeleBot
 
 # ================= الإعدادات =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8651111573:AAFUnC1pLioFKdPxLmk_7GA54-KkGCNvcNk")
-CHAT_ID = os.getenv("CHAT_ID", "1330666633")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER", "101145238")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))  # كل ساعة افتراضياً
+BOT_TOKEN = "8651111573:AAFUnC1pLioFKdPxLmk_7GA54-KkGCNvcNk"
+CHAT_ID = "1330666633"
+PHONE_NUMBER = "101145238"
+CHECK_INTERVAL = 3600  # الفحص كل ساعة
 
-telebot.logger.setLevel(logging.CRITICAL)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
-if not BOT_TOKEN or ":" not in BOT_TOKEN:
-    raise ValueError("BOT_TOKEN غير صالح. أضفه من المتغيرات ويجب أن يحتوي على ':'")
+# إعدادات API موقع adsl-yemen.com المستخرجة
+SUPABASE_URL = "https://kgowhsapgrolcyuiqwzf.supabase.co/functions/v1/telecom-inquiry"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtnb3doc2FwZ3JvbGN5dWlxd3pmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYyNTYxNzgsImV4cCI6MjA4MTgzMjE3OH0.3aHxxmaoWswxhzMAcc1aRas02bNnpxbPtf85JtCNe7I"
+HMAC_SECRET = "X7k9mP2vQ4wR8tY1uN3bF6hJ0cL5dS9aE2gI4oK7nM"
 
 bot = TeleBot(BOT_TOKEN)
 
-last_low_balance_alert = None
-last_report_sent = None
+def generate_signature(timestamp, nonce, mobile, service_type):
+    """توليد التوقيع الرقمي المطلوب من قبل الـ API"""
+    message = f"{timestamp}:{nonce}:{mobile}:{service_type}"
+    signature = hmac.new(
+        HMAC_SECRET.encode('utf-8'),
+        message.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    return base64.b64encode(signature).decode('utf-8')
 
-# ================= دالة جلب البروكسيات التلقائية =================
-def get_fresh_yemeni_proxies():
-    """تقوم بجلب أحدث البروكسيات اليمنية من API مجاني"""
-    logging.info("جاري جلب بروكسيات يمنية جديدة من API...")
-    proxies = []
+def get_balance_from_adsl_yemen():
+    """الاستعلام عن الرصيد باستخدام API موقع adsl-yemen.com"""
     try:
-        # استخدام ProxyScrape API لجلب بروكسيات HTTP لدولة اليمن
-        api_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=YE&ssl=all&anonymity=all"
-        response = requests.get(api_url, timeout=10)
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid.uuid4())
+        service_type = "4g"
         
-        if response.status_code == 200:
-            # تقسيم النص إلى أسطر وتنظيف المسافات
-            raw_proxies = response.text.strip().split('\n')
-            proxies = [p.strip() for p in raw_proxies if p.strip()]
-            logging.info(f"✅ تم العثور على {len(proxies)} بروكسي يمني جديد.")
+        signature = generate_signature(timestamp, nonce, PHONE_NUMBER, service_type)
+        
+        headers = {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "X-Preferred-Language": "ar",
+            "X-Request-Timestamp": timestamp,
+            "X-Request-Nonce": nonce,
+            "X-Request-Signature": signature,
+            "User-Agent": "Mozilla/5.0"
+        }
+        
+        payload = {
+            "type": service_type,
+            "mobile": PHONE_NUMBER,
+            "action": "query"
+        }
+        
+        response = requests.post(SUPABASE_URL, headers=headers, json=payload, timeout=20)
+        result = response.json()
+        
+        if response.status_code == 200 and result.get("success"):
+            data = result.get("data", {})
+            balance = data.get("avblnce", "غير متوفر")
+            package = data.get("baga_amount", "غير متوفر")
+            expiry = data.get("expdate", "غير متوفر")
+            
+            report = (
+                f"📊 **نتيجة استعلام Yemen 4G**\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📞 رقم المودم: `{PHONE_NUMBER}`\n"
+                f"💰 الرصيد المتاح: `{balance}`\n"
+                f"📦 قيمة الباقة: `{package}`\n"
+                f"🗓️ تاريخ الانتهاء: `{expiry}`\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🔗 تم الاستعلام عبر adsl-yemen.com"
+            )
+            return report
+        elif response.status_code == 429:
+            return "⚠️ تم تجاوز حد الاستعلامات المسموح به حالياً. يرجى المحاولة لاحقاً."
         else:
-            logging.warning(f"⚠️ فشل جلب البروكسيات، كود الاستجابة: {response.status_code}")
+            error_msg = result.get("error", "حدث خطأ غير معروف")
+            return f"❌ فشل الاستعلام: {error_msg}"
             
     except Exception as e:
-        logging.error(f"❌ خطأ أثناء الاتصال بـ API البروكسيات: {e}")
-        
-    return proxies
-
-
-# ================= دوال فك التشفير واستخراج البيانات =================
-def solve_altcha(challenge_json):
-    salt = challenge_json.get("salt", "")
-    target = challenge_json.get("challenge", "")
-
-    for number in range(1000000):
-        text = salt + str(number)
-        hash_result = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if hash_result == target:
-            payload = {
-                "algorithm": "SHA-256",
-                "challenge": target,
-                "number": number,
-                "salt": salt,
-                "signature": challenge_json.get("signature", "")
-            }
-            return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
-    return None
-
-def parse_balance_text(report_text):
-    match = re.search(r"رصيد الإنترنت:\s*(.+)", report_text)
-    if match:
-        return match.group(1).strip()
-    return None
-
-def is_low_balance(balance_text):
-    if not balance_text:
-        return False
-
-    text = (
-        balance_text
-        .replace("جيجا", "")
-        .replace("GB", "")
-        .replace("gb", "")
-        .strip()
-    )
-
-    num_match = re.search(r"(\d+(?:\.\d+)?)", text)
-    if not num_match:
-        return False
-
-    try:
-        value = float(num_match.group(1))
-        return value <= 1.0
-    except Exception:
-        return False
-
-def extract_result_from_html(html):
-    table_match = re.search(
-        r'<table class="transdetail"[^>]*>(.*?)</table>',
-        html,
-        re.DOTALL | re.IGNORECASE
-    )
-
-    if table_match:
-        table_html = table_match.group(1)
-        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.DOTALL | re.IGNORECASE)
-        info = []
-
-        for row in rows:
-            cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", row, re.DOTALL | re.IGNORECASE)
-            if len(cells) >= 2:
-                key = re.sub(r"<[^>]+>", "", cells[0]).strip()
-                val = re.sub(r"<[^>]+>", "", cells[1]).strip()
-
-                if "رصيد الحساب" in key or "الرصيد المالي" in key:
-                    info.append(f"💰 الرصيد المالي: {val}")
-                elif "الرصيد المتاح" in key or "رصيد الإنترنت" in key:
-                    info.append(f"🌐 رصيد الإنترنت: {val}")
-                elif "تاريخ انتهاء" in key:
-                    info.append(f"🗓️ تاريخ الانتهاء: {val}")
-
-        if info:
-            return "\n".join(info)
-
-    msg_match = re.search(
-        r'<div[^>]*id="qbillmsgnew"[^>]*>(.*?)</div>',
-        html,
-        re.DOTALL | re.IGNORECASE
-    )
-    if msg_match:
-        clean_msg = re.sub(r"<[^>]+>", "", msg_match.group(1)).strip()
-        return f"⚠️ رسالة الموقع: {clean_msg}"
-
-    return "⚠️ تم الوصول للموقع لكن لم أستطع استخراج النتيجة."
-
-def try_query_with_session(session):
-    res = session.get("https://ptc.gov.ye/?page_id=9017", timeout=15)
-
-    if "challengeurl" not in res.text:
-        return None, "⚠️ الصفحة فتحت لكن لم يظهر challengeurl، أو أن الموقع رفض الـ IP."
-
-    match = re.search(r'challengeurl="([^"]+)"', res.text)
-    if not match:
-        return None, "⚠️ تعذر العثور على challengeurl."
-
-    challenge_url = match.group(1).replace("&amp;", "&")
-    if not challenge_url.startswith("http"):
-        challenge_url = "https://ptc.gov.ye" + challenge_url
-
-    challenge_res = session.get(challenge_url, timeout=15)
-    altcha_payload = solve_altcha(challenge_res.json())
-
-    if not altcha_payload:
-        return None, "⚠️ تعذر حل Altcha."
-
-    hidden_inputs = re.findall(
-        r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"',
-        res.text
-    )
-    data = {name: value for name, value in hidden_inputs}
-    data.update({
-        "phone4gidnew": PHONE_NUMBER,
-        "security_token_4gbill": altcha_payload,
-        "qsubmitnew": "استعلام"
-    })
-
-    post_res = session.post("https://ptc.gov.ye/?page_id=9017", data=data, timeout=15)
-
-    if "تجاوزت عدد مرات الاستعلام" in post_res.text:
-        return None, "⏳ الموقع يطلب الانتظار بسبب كثرة المحاولات."
-
-    return extract_result_from_html(post_res.text), None
-
-# ================= دالة جلب الرصيد الرئيسية =================
-def get_balance_with_retry():
-    # المحاولة الأولى: بدون بروكسي
-    try:
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-        result, error = try_query_with_session(session)
-        if result:
-            logging.info("Success without proxy")
-            return result
-        logging.warning(f"Direct request failed: {error}")
-    except Exception as e:
-        logging.error(f"Direct request failed: {e}")
-
-    # المحاولات التالية: جلب بروكسيات جديدة ثم تجربتها
-    fresh_proxies = get_fresh_yemeni_proxies()
-    
-    if not fresh_proxies:
-        return "❌ فشل الاستعلام: الاتصال المباشر فشل، ولم يتم العثور على بروكسيات يمنية متاحة حالياً."
-
-    for p in fresh_proxies:
-        try:
-            session = requests.Session()
-            session.headers.update({"User-Agent": "Mozilla/5.0"})
-            session.proxies.update({
-                "http": f"http://{p}",
-                "https": f"http://{p}",
-            })
-
-            logging.info(f"Trying proxy: {p}")
-            result, error = try_query_with_session(session)
-
-            if result:
-                logging.info(f"Success with proxy: {p}")
-                return result
-
-            logging.warning(f"Proxy failed {p}: {error}")
-
-        except Exception as e:
-            logging.error(f"Attempt failed with proxy {p}: {e}")
-            continue
-
-    return "❌ فشل الاستعلام بعد تجربة الاتصال المباشر وجميع البروكسيات اليمنية التي تم جلبها."
-
-# ================= التقرير التلقائي وواجهة البوت =================
-def auto_report():
-    global last_low_balance_alert, last_report_sent
-
-    while True:
-        try:
-            report = get_balance_with_retry()
-            logging.info(report)
-
-            if "💰" in report or "🌐" in report:
-                if report != last_report_sent:
-                    bot.send_message(CHAT_ID, f"📊 تقرير الرصيد:\n\n{report}")
-                    last_report_sent = report
-
-                balance_text = parse_balance_text(report)
-                if is_low_balance(balance_text):
-                    if balance_text != last_low_balance_alert:
-                        bot.send_message(CHAT_ID, f"🚨 تنبيه: رصيد الإنترنت منخفض\n\n{report}")
-                        last_low_balance_alert = balance_text
-            else:
-                # يمكنك إلغاء تفعيل هذا السطر إذا لم تكن تريد تلقي رسائل الأخطاء بشكل متكرر
-                bot.send_message(CHAT_ID, report) 
-
-        except Exception as e:
-            logging.error(f"auto_report error: {e}")
-
-        time.sleep(CHECK_INTERVAL)
+        return f"📡 خطأ في الاتصال بالخدمة: {str(e)}"
 
 @bot.message_handler(commands=["start"])
 def start_message(message):
@@ -258,18 +97,33 @@ def start_message(message):
     )
 
 @bot.message_handler(commands=["check"])
-def check_balance(message):
-    bot.reply_to(message, "⏳ جاري جلب بروكسيات جديدة وفحص الرصيد...")
-    result = get_balance_with_retry()
-    bot.send_message(message.chat.id, result)
+def command_check(message):
+    bot.reply_to(message, "⏳ جاري الاستعلام من adsl-yemen.com...")
+    report = get_balance_from_adsl_yemen()
+    bot.send_message(message.chat.id, report, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda message: message.text == ".")
+@bot.message_handler(func=lambda message: message.text == '.')
 def manual_check(message):
-    bot.reply_to(message, "⏳ جاري محاولة جلب الرصيد...")
-    result = get_balance_with_retry()
-    bot.send_message(message.chat.id, result)
+    bot.reply_to(message, "⏳ جاري الاستعلام من adsl-yemen.com...")
+    report = get_balance_from_adsl_yemen()
+    bot.send_message(message.chat.id, report, parse_mode="Markdown")
+
+def auto_report():
+    """إرسال تقرير تلقائي بناءً على الوقت المحدد"""
+    last_report_sent = None
+    
+    while True:
+        report = get_balance_from_adsl_yemen()
+        
+        # إرسال التقرير فقط إذا لم يكن هناك خطأ في الاتصال
+        if "فشل" not in report and "خطأ" not in report:
+            if report != last_report_sent:
+                bot.send_message(CHAT_ID, f"🔔 **تقرير دوري**\n\n{report}", parse_mode="Markdown")
+                last_report_sent = report
+                
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    print("البوت يعمل الآن...")
+    print("البوت يعمل الآن... أرسل نقطة (.) أو /check للاستعلام")
     threading.Thread(target=auto_report, daemon=True).start()
-    bot.polling(none_stop=True, interval=1, timeout=30)
+    bot.polling(none_stop=True)
